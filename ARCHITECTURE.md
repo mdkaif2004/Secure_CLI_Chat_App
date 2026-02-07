@@ -26,22 +26,22 @@ The system implements a **Client-Server-Client** topology where the server (Rela
 
 ```mermaid
 graph TD
-    UserA["User A (Terminal)"] -->|Stdin/Stdout| ClientA[Secure Chat Client A]
-    UserB["User B (Terminal)"] -->|Stdin/Stdout| ClientB[Secure Chat Client B]
+    UserA["User A (Terminal)"] -->|Stdin/Stdout| ClientA["Secure Chat Client A"]
+    UserB["User B (Terminal)"] -->|Stdin/Stdout| ClientB["Secure Chat Client B"]
     
     subgraph "Untrusted Network Zone"
-        ClientA <-->|Encrypted WebSocket (TLS)| Relay[Relay Server]
-        Relay <-->|Encrypted WebSocket (TLS)| ClientB
+        ClientA <-->|Encrypted WebSocket TLS| Relay["Relay Server"]
+        Relay <-->|Encrypted WebSocket TLS| ClientB
     end
 
     subgraph "Client A Internal Boundary"
-        ClientA --> CryptoA[Crypto Module (RAM Only)]
-        ClientA --> StateA[State Machine]
+        ClientA --> CryptoA["Crypto Module - RAM Only"]
+        ClientA --> StateA["State Machine"]
     end
 
     style ClientA fill:#cfc,stroke:#333,stroke-width:2px
     style ClientB fill:#cfc,stroke:#333,stroke-width:2px
-    style Relay fill:#f9f,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5
+    style Relay fill:#f9f,stroke:#333,stroke-width:2px,stroke-dasharray:5 5
 ```
 
 ---
