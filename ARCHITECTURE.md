@@ -25,8 +25,8 @@ The system follows a **Client-Server-Client** topology where the server (Relay) 
 
 ```mermaid
 graph TD
-    UserA[User A (Terminal)] -->|Input/Output| ClientA[Secure Chat Client A]
-    UserB[User B (Terminal)] -->|Input/Output| ClientB[Secure Chat Client B]
+    UserA["User A (Terminal)"] -->|Input/Output| ClientA[Secure Chat Client A]
+    UserB["User B (Terminal)"] -->|Input/Output| ClientB[Secure Chat Client B]
     
     subgraph "Untrusted Network"
         ClientA <-->|Encrypted WebSocket (TLS)| Relay[Relay Server]
