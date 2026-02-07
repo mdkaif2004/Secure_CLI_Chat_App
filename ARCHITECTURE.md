@@ -1,36 +1,42 @@
-# System Architecture Documentation
+# System Architecture & Technical Specification
 
 **Project:** Secure CLI Peer-to-Peer Chat Application  
 **Version:** 1.0.0  
-**Status:** Active Prototype
+**Status:** Active Prototype  
+**Audience:** System Architects, Security Engineers, Developers
 
 ---
 
 ## 1. Executive Summary
 
-The Secure CLI Chat Application is a terminal-based communication tool designed for high-security, ephemeral, and anonymous text exchange. Unlike traditional messaging platforms that store history or rely on central identity servers, this system employs a **Zero Trust** architecture where:
-- All encryption keys are generated in volatile memory (RAM) and never written to disk.
-- The relay server acts as a blind tunnel, unable to inspect or persist traffic.
-- Sessions are strictly peer-to-peer (P2P) logic routed through a lightweight WebSocket relay.
+This document provides a comprehensive technical breakdown of the Secure CLI Chat Application. The system is designed to provide **Zero Trust**, **Ephemeral**, and **End-to-End Encrypted (E2EE)** communication between two parties over an untrusted network.
 
-This document serves as the authoritative technical reference for developers, security auditors, and system architects.
+**Core Philosophy:**
+*   **Trust No One:** The relay server is treated as a hostile entity.
+*   **Leave No Trace:** All state is held in volatile memory (RAM) and aggressively wiped.
+*   **Fail Secure:** Any protocol deviation results in immediate session destruction.
 
 ---
 
 ## 2. High-Level Architecture
 
-The system follows a **Client-Server-Client** topology where the server (Relay) is minimized to a packet-forwarding role. The intelligence, security, and state management reside entirely on the Client edges.
+The system implements a **Client-Server-Client** topology where the server (Relay) functions strictly as a blind packet forwarder. The intelligence, security, and state management are pushed entirely to the "Edge" (the Clients).
 
 ### 2.1 Context Diagram
 
 ```mermaid
 graph TD
-    UserA["User A (Terminal)"] -->|Input/Output| ClientA[Secure Chat Client A]
-    UserB["User B (Terminal)"] -->|Input/Output| ClientB[Secure Chat Client B]
+    UserA["User A (Terminal)"] -->|Stdin/Stdout| ClientA[Secure Chat Client A]
+    UserB["User B (Terminal)"] -->|Stdin/Stdout| ClientB[Secure Chat Client B]
     
-    subgraph "Untrusted Network"
+    subgraph "Untrusted Network Zone"
         ClientA <-->|Encrypted WebSocket (TLS)| Relay[Relay Server]
         Relay <-->|Encrypted WebSocket (TLS)| ClientB
+    end
+
+    subgraph "Client A Internal Boundary"
+        ClientA --> CryptoA[Crypto Module (RAM Only)]
+        ClientA --> StateA[State Machine]
     end
 
     style ClientA fill:#cfc,stroke:#333,stroke-width:2px
@@ -38,169 +44,204 @@ graph TD
     style Relay fill:#f9f,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5
 ```
 
-### 2.2 Core Design Principles
-
-1.  **Ephemeral By Design:** No database, no logs, no config files with secrets. Everything resets on process exit.
-2.  **End-to-End Encryption (E2EE):** Data is encrypted *before* it touches the network stack.
-3.  **Strict State Management:** The application can only exist in one valid state at a time (e.g., you cannot send a message if you are still in `KEY_SETUP`).
-4.  **Modular Isolation:** Cryptography code is separated from UI and Network code to minimize side-channel risks.
-
 ---
 
-## 3. Technology Stack
+## 3. Directory Structure & Module Responsibilities
 
-### 3.1 Language & Runtime
-*   **Language:** Python 3.10+ (Type Hints enabled)
-*   **Runtime:** Standard CPython (with potential for PyPy for performance).
+The codebase is organized by domain responsibility. Each module isolates its dependencies to prevent leakage (e.g., UI code never touches raw private keys).
 
-### 3.2 Libraries & Dependencies
-| Library | Purpose | Justification |
-| :--- | :--- | :--- |
-| **`PyNaCl`** | Cryptography | Python binding for `libsodium`. Provides "best-practice" primitives (Curve25519, XSalsa20, Poly1305) avoiding low-level crypto pitfalls. |
-| **`websockets`** | Networking | Asyncio-based WebSocket implementation. Robust, standards-compliant, and handles long-lived connections efficiently. |
-| **`rich`** | UI | Renders advanced terminal graphics (panels, colors, progress bars) for a professional UX. |
-| **`prompt_toolkit`** | Input | Handles asynchronous user input, preventing the blocking of network threads while typing. |
-
----
-
-## 4. Component Design
-
-The application structure is domain-driven.
-
-### 4.1 Core Module (`core/`)
-*   **`SessionManager`**: The "Brain" of the client. It owns the `KeyManager`, `EncryptionHandler`, and `TransportLayer`. It mediates data flow between these components using the Observer pattern (callbacks).
-*   **`StateMachine` (`state_machine.py`)**: Enforces the valid lifecycle of a chat session.
-    *   *States:* `INIT` -> `SEARCHING` -> `USER_FOUND` -> `KEY_SETUP` -> `CONNECTED` -> `DISCONNECTED` -> `DESTROYED`.
-
-### 4.2 Cryptography Module (`crypto/`)
-*   **`KeyManager`**: Handles `private_key` (Curve25519) generation.
-    *   *Security:* Keys are stored as instance attributes. The `wipe_keys()` method attempts to clear these references.
-*   **`EncryptionHandler`**: Wraps `nacl.public.Box`.
-    *   *Algorithm:* **X25519** for key exchange, **XSalsa20** for stream encryption, **Poly1305** for MAC (Message Authentication Code).
-*   **`MemoryWiper`**: A utility class attempting `ctypes` based memory overwrites for mutable buffers (best effort in managed Python).
-
-### 4.3 Network Module (`network/`)
-*   **`TransportLayer`**: Manages the raw WebSocket connection.
-    *   *Protocol:* JSON-based signaling.
-    *   *Responsibility:* Reconnecting, sending raw strings, parsing incoming JSON, handling socket errors.
-*   **`Relay Guard`** (Concept): Logic within the relay to ensure max 2 peers per room.
-
-### 4.4 User Interface (`ui/`)
-*   **`SecureChatCLI`**: The view layer.
-    *   Uses `rich.console` for output.
-    *   Uses `prompt_toolkit.PromptSession` for non-blocking input.
-    *   *Isolation:* The UI knows nothing about crypto keys; it only receives plaintext strings from `SessionManager`.
-
----
-
-## 5. Data Flow & Protocols
-
-### 5.1 Connection & Handshake Sequence
-
-```mermaid
-sequenceDiagram
-    participant A as Client A
-    participant R as Relay
-    participant B as Client B
-
-    A->>R: JOIN {"room": "ROOM1"}
-    R-->>A: (Waiting)
-    B->>R: JOIN {"room": "ROOM1"}
-    R-->>B: (Joined)
-    R->>A: PEER_FOUND
-    R->>B: PEER_FOUND
-    
-    Note over A,B: Ephemeral Key Generation (Local RAM)
-    
-    A->>R: SIGNAL {"kind": "KEY_EXCHANGE", "key": "PubA..."}
-    R->>B: Forward Signal
-    
-    B->>R: SIGNAL {"kind": "KEY_EXCHANGE", "key": "PubB..."}
-    R->>A: Forward Signal
-    
-    Note over A,B: Shared Secret Derivation (ECDH)
-    
-    A->>A: State -> CONNECTED
-    B->>B: State -> CONNECTED
+```text
+.
+├── main.py                  # Entry Point: Initializes CLI and Event Loop.
+├── run.sh                   # Bootstrap: Checks Python ver, creates Venv, launches Relay/App.
+├── relay_server.py          # Infrastructure: Dumb WebSocket forwarder.
+├── core/
+│   ├── session_manager.py   # Controller: Orchestrates UI, Net, and Crypto.
+│   └── state_machine.py     # Logic: Defines strict app lifecycle.
+├── crypto/
+│   ├── key_manager.py       # Secrets: Generates/Stores keys in RAM.
+│   ├── encryption.py        # Algo: Implements PyNaCl Box (X25519/XSalsa20).
+│   └── memory_wiper.py      # Hygiene: overwrite_object() logic.
+├── network/
+│   └── transport.py         # IO: Async WebSocket handling & JSON framing.
+├── security/
+│   └── rate_limiter.py      # Protection: Token Bucket anti-spam.
+├── ui/
+│   └── cli.py               # View: Rich Console & PromptToolkit input loop.
+└── utils/
+    ├── validators.py        # Safety: Regex checks for inputs.
+    └── error_codes.py       # Standards: Int-based error mapping.
 ```
 
-### 5.2 Relay Protocol Specification
-The Relay Server expects JSON payloads.
+---
 
-**1. Join Room**
+## 4. Component Specifications
+
+### 4.1 Core: Session Manager (`core/session_manager.py`)
+*   **Role:** The central nervous system. It connects the `UI` events to `Network` actions and applies `Crypto` transformations.
+*   **Key Methods:**
+    *   `start_session(room_code)`: Initiates connection to relay.
+    *   `perform_handshake()`: Triggers key generation and sends public key.
+    *   `on_network_message(payload)`: Routes incoming signals (Handshake vs. Message).
+    *   `destroy_session()`: The "Kill Switch". Disconnects socket, wipes keys, kills UI loop.
+
+### 4.2 Crypto: Encryption Handler (`crypto/encryption.py`)
+*   **Library:** `PyNaCl` (libsodium binding).
+*   **Primitive:** `nacl.public.Box`.
+*   **Algorithms:**
+    *   **Key Exchange:** X25519 (Elliptic Curve Diffie-Hellman).
+    *   **Encryption:** XSalsa20 stream cipher.
+    *   **Authentication:** Poly1305 MAC (Message Authentication Code).
+*   **Nonce Handling:** `PyNaCl` automatically generates random 24-byte nonces for XSalsa20, prepended to the ciphertext.
+*   **Data Flow:** `String` -> `Bytes` -> `Box.encrypt()` -> `Bytes` -> `Base64` -> `Network`.
+
+### 4.3 Network: Transport Layer (`network/transport.py`)
+*   **Protocol:** WebSockets (`ws://` or `wss://`).
+*   **Framing:** All messages are JSON strings.
+*   **Behavior:**
+    *   Maintains a persistent connection.
+    *   Implements an async listen loop `async for message in websocket`.
+    *   Decoupled from logic: It just calls `on_message_callback(dict)` when data arrives.
+
+---
+
+## 5. Protocol Specification (Wire Format)
+
+All network traffic flows through the Relay. The protocol uses strictly typed JSON messages.
+
+### 5.1 Joining a Room
+**Direction:** Client -> Relay
 ```json
 {
   "type": "JOIN",
-  "room": "TargetRoomCode"
+  "room": "ALPHA1"  // Regex: ^[A-Z0-9]{8,16}$
 }
 ```
 
-**2. Signal (Generic Forwarding)**
-Used for Key Exchange and Encrypted Messages.
+### 5.2 Peer Discovery (Relay Response)
+**Direction:** Relay -> Client
+```json
+{
+  "type": "PEER_FOUND" // Sent when 2nd client joins
+}
+```
+
+### 5.3 Signaling (General Purpose)
+Used for both Key Exchange and Encrypted Data. The Relay blindly forwards these to the *other* peer in the room.
+
+**A. Key Exchange Packet**
 ```json
 {
   "type": "SIGNAL",
-  "kind": "KEY_EXCHANGE" | "MSG",
-  "payload": "<Base64 Encoded Content>",
-  "key": "<Optional Public Key>"
+  "kind": "KEY_EXCHANGE",
+  "key": "<Base64 Encoded 32-byte Curve25519 Public Key>"
+}
+```
+
+**B. Encrypted Message Packet**
+```json
+{
+  "type": "SIGNAL",
+  "kind": "MSG",
+  "payload": "<Base64 Encoded Encrypted Blob (Nonce + Ciphertext)>"
 }
 ```
 
 ---
 
-## 6. Security Considerations
+## 6. State Machine Lifecycle
 
-### 6.1 Threat Model
-| Threat | Mitigation | Status |
-| :--- | :--- | :--- |
-| **Relay Compromise** | The relay only sees encrypted blobs (XSalsa20). It cannot decrypt traffic without the private keys which never leave the clients. | ✅ Secure |
-| **Man-in-the-Middle (MITM)** | The initial key exchange is susceptible to MITM if the Relay is active and malicious during the handshake (Active Attack). | ⚠️ Risk (See Future Plans) |
-| **Endpoint Seizure** | If a user's machine is seized *during* a chat, keys are in RAM. | ⚠️ Risk (RAM Extraction) |
-| **Forensics** | Once the app closes, `wipe_keys()` runs. Python GC makes perfect erasure hard, but no file persistence makes recovery extremely difficult. | ✅ Resilient |
+The application enforces a strict state flow to prevent logic bugs (e.g., receiving a message before keys are exchanged).
 
-### 6.2 Application Security
-*   **Rate Limiting:** The `RateLimiter` class (Token Bucket algorithm) prevents a user from flooding the connection, which could crash the peer's decryption routine or UI.
-*   **Input Validation:** Strict regex on Room Codes (`^[A-Z0-9]+$`) prevents injection attacks in the relay logic.
-
----
-
-## 7. Scalability & Deployment
-
-### 7.1 Scalability
-*   **Current Limit:** The Relay Server is single-process, asyncio-based. It can handle thousands of concurrent *idle* connections, but high-throughput active chats will be CPU-bound by Python's GIL.
-*   **Scaling Strategy:** 
-    1.  Deploy multiple Relay nodes behind a Load Balancer.
-    2.  Use Redis Pub/Sub to sync "Room State" across nodes (so Client A on Node 1 can talk to Client B on Node 2).
-
-### 7.2 Deployment
-*   **Local:** Uses `run.sh` to spawn a `localhost` relay.
-*   **Production:** The `relay_server.py` should be run behind Nginx/Caddy with SSL termination (`wss://`) to protect against passive network sniffing of metadata (like IP addresses).
+| State | Trigger | Next State | Action |
+| :--- | :--- | :--- | :--- |
+| `INIT` | App Start | `INPUT_VALIDATION` | Prompt for Room Code |
+| `INPUT_VALIDATION`| User Input | `SEARCHING` | Connect to Relay |
+| `SEARCHING` | Server Msg (`PEER_FOUND`) | `USER_FOUND` | Trigger Handshake |
+| `USER_FOUND` | Internal | `KEY_SETUP` | Generate Keys, Send PubKey |
+| `KEY_SETUP` | Net Msg (`KEY_EXCHANGE`) | `CONNECTED` | Compute Shared Secret |
+| `CONNECTED` | User Input | `CONNECTED` | Encrypt & Send |
+| `ANY` | Network Error / `/quit` | `DISCONNECTED` | - |
+| `DISCONNECTED` | Internal | `SESSION_DESTROYED` | Wipe Keys, Exit |
 
 ---
 
-## 8. Testing & Maintenance
+## 7. Cryptographic Standard & Security Model
 
-### 8.1 Testing Strategy
-*   **Unit Tests:** Test `crypto` functions with test vectors (Ensure A encrypts -> B decrypts).
-*   **Integration Tests:** Spawn 2 subprocess clients and verify they reach `CONNECTED` state.
-*   **Fuzzing:** Send malformed JSON to the Relay and Client Transport to ensure no crashes.
+### 7.1 Key Generation
+*   **Type:** Ephemeral.
+*   **Storage:** Instance variables in `KeyManager` class.
+*   **Lifetime:** Bound to the process lifecycle or session duration.
+*   **Wiping:** On `destroy_session()`, the `MemoryWiper` class attempts to overwrite the memory locations (though Python's immutable types makes this "best effort" via reference dropping and forced GC).
 
-### 8.2 Maintenance Plan
-*   **Dependency Audits:** Regular `pip audit` to check for vulnerabilities in `cryptography` or `websockets`.
-*   **Key Rotation:** Not needed (Sessions are ephemeral).
+### 7.2 Message Pipeline
+1.  **Input:** User types "Hello".
+2.  **Validation:** Length check (max 1000 chars).
+3.  **Encoding:** UTF-8 bytes.
+4.  **Encryption:** `Box(priv_A, pub_B).encrypt(bytes)`.
+    *   Generates 24-byte random Nonce.
+    *   Encrypts with XSalsa20.
+    *   Computes Poly1305 MAC.
+    *   Output: `Nonce || Ciphertext || MAC`.
+5.  **Transport Encoding:** Base64 encode the binary blob.
+6.  **Transmission:** Send JSON to Relay.
+
+### 7.3 Threat Mitigation
+| Attack Vector | Countermeasure |
+| :--- | :--- |
+| **Relay Snooping** | Relay sees only Base64 blobs. Cannot decrypt without private keys (which never leave clients). |
+| **Replay Attacks** | Relay Logic enforces real-time forwarding. Clients could implement a rolling counter inside the encrypted payload (Future Work). |
+| **Message Tampering** | Poly1305 MAC check fails on decryption. Client drops packet and alerts user. |
+| **Traffic Analysis** | All packets look identical (JSON wrappers). TLS (in Prod) hides metadata. |
 
 ---
 
-## 9. Future Roadmap
+## 8. Deployment & Scalability
 
-### 9.1 Short Term (v1.1)
-*   **Authentication:** Shared Password / Pre-Shared Key (PSK) verification *before* key exchange to prevent MITM.
-*   **File Transfer:** Chunked, encrypted file transfer support.
+### 8.1 Local / Prototype
+*   **Relay:** Runs on `localhost:8765`.
+*   **Clients:** Run in separate terminals.
+*   **Dependencies:** Minimal (`websockets`, `cryptography`, `rich`, `prompt_toolkit`).
 
-### 9.2 Long Term (v2.0)
-*   **Tor Integration:** Route traffic over Tor (Socks5) to hide IP addresses from the Relay.
-*   **Rust Rewrite:** Move the Core and Crypto modules to a Rust extension module (PyO3) for true memory safety and perfect wiping.
-*   **Auditable Builds:** Reproducible builds to guarantee the source matches the binary.
+### 8.2 Production Deployment Strategy
+1.  **Relay Hosting:**
+    *   Containerize `relay_server.py` (Docker).
+    *   Orchestrate with Kubernetes for auto-scaling.
+    *   Load Balancer (Nginx) terminates SSL (`wss://`) and forwards to containers.
+2.  **Client Distribution:**
+    *   Package as a single binary using `PyInstaller`.
+    *   Sign the binary to prevent tampering.
 
 ---
-*Generated by Gemini CLI Agent*
+
+## 9. Developer Guide (How to Reproduce)
+
+### 9.1 Prerequisites
+*   Python 3.10+
+*   Git
+
+### 9.2 Setup Steps
+1.  **Clone:** `git clone <repo_url>`
+2.  **Inspect:** Read `run.sh` to understand the boot process.
+3.  **Run:** Execute `./run.sh`.
+    *   This script creates a `venv`.
+    *   Installs `requirements.txt`.
+    *   Backgrounds `relay_server.py` (checks port 8765).
+    *   Launches `main.py`.
+
+### 9.3 Extension Points
+*   **Add Authentication:** Modify `handshake` in `session_manager.py` to include a password hash.
+*   **Add File Transfer:** Create a new `kind: FILE_CHUNK` in `transport.py`.
+*   **Change Crypto:** Swap `KeyManager` implementation to use `Kyber` (Post-Quantum) if library support exists.
+
+---
+
+## 10. Future Roadmap
+
+1.  **Identity Verification:** Implement "Socialist Millionaire Protocol" (SMP) to verify that both parties know a shared secret without revealing it.
+2.  **Obfuscation:** Padding messages to constant length to foil traffic analysis.
+3.  **Onion Routing:** Native integration with Tor for IP anonymity.
+4.  **Rust Core:** Rewrite `crypto/` and `core/` in Rust (using `PyO3`) for guaranteed memory safety and true zeroization.
+
+---
+*End of Specification*
