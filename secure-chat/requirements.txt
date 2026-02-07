@@ -1,0 +1,5 @@
+cryptography
+pynacl
+websockets
+rich
+prompt_toolkit
